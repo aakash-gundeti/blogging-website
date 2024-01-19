@@ -1,32 +1,42 @@
-import express from 'express';
-import mongoose from 'mongoose';
-import 'dotenv/config';
+import express from "express";
+import mongoose from "mongoose";
+import "dotenv/config";
 import bcrypt from "bcrypt";
-import { nanoid } from 'nanoid';
-import jwt from 'jsonwebtoken';
-
+import { nanoid } from "nanoid";
+import jwt from "jsonwebtoken";
+import cors from "cors";
+import admin from "firebase-admin";
+import {getAuth} from "firebase-admin/auth";
+import serviceAccountKey from "./blogging-website-2c39e-firebase-adminsdk-70cpm-0e336b0458.json" assert {type:"json"};
 
 import User from './Schema/User.js';
 
 const app = express();
 let PORT = 3000;
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccountKey)
+})
+
 let emailRegex = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/; // regex for email
 let passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/; // regex for password
 
 app.use(express.json());
+app.use(cors());
 mongoose.connect(process.env.DB_LOCATION, {
   autoIndex: true
 });
 
 const generateUsername = async (email) => {
   let username = email.split("@")[0];
-
+  console.log('username',username);
   let userNameNotUnique = await User.exists({ "personal_info.username": username }).then((result) => result);
   
   userNameNotUnique ? username += nanoid().substring(0,5) : "";
 
   return username;
 }
+
 const formatData = (user) => {
 
   const access_token = jwt.sign({ id: user._id }, process.env.SECRET_ACCESS_KEY );
@@ -38,6 +48,7 @@ const formatData = (user) => {
     fullname: user.personal_info.fullname
   }
 }
+
 app.post("/signup",(req, res) => {
   let { fullname, email, password } = req.body;
 
@@ -66,6 +77,8 @@ app.post("/signup",(req, res) => {
       personal_info: { fullname, email, password: hashed_password, username }
     });
 
+    console.log('signin',user)
+
     user.save().then((u) => {
       return res.status(200).json(formatData(u));
     })
@@ -80,7 +93,84 @@ app.post("/signup",(req, res) => {
 
 app.post("/signin", (req, res) => {
   let { email, password } = req.body;
+
+  User.findOne({ "personal_info.email": email})
+  .then((user) => {
+    if(!user){
+      return res.status(403).json({ "error" : "Email not found" })
+    }
+
+    if(!user.google_auth){
+      bcrypt.compare(password, user.personal_info.password, (err, result) => {
+        if(err){
+          return res.status(403).json({ "error" : "Error occured while login please try again" })
+        }
   
+        if(!result){
+          return res.status(403).json({ "error" : "Incorrect password" })
+        } else {
+          return res.status(200).json(formatData(user));
+        }
+      });
+    } else {
+      return res.status(403).json({ "error" : "Account was created using google. Try logging in with google." })
+    }
+  })
+  .catch((err) => {
+    console.log(err);
+    return res.status(500).json({ "error" : err.message })
+  })
+  
+})
+
+app.post("/google-auth", async (req, res) => {
+  let { access_token } = req.body;
+
+  getAuth()
+  .verifyIdToken(access_token)
+  .then(async (decodedUser) => {
+    let { email, name, picture } = decodedUser;
+    console.log(decodedUser)
+    picture = picture.replace("s96-c", "s384-c");
+
+    let user = await User.findOne({ "personal_info.email": email }).select("personal_info.fullname personal_info.username personal_info.profile_img google_auth")
+    .then((u) => {
+      return u || null
+    })
+    .catch(err => {
+      console.log('error server',err)
+      return res.status(500).json({"error": err.message})
+    })
+
+    if(user){//login
+      if(!user.google_auth){
+        return res.status(403).json({"error" : "This email was signed up without google. Please log in with password to access the account"})
+      }
+    }else{ //signup
+      console.log('email',email);
+      let username = await generateUsername(email);
+      console.log('username',username)
+      console.log('name',name)
+
+      user = new User({
+        personal_info: { fullname: name, email, username },
+        google_auth: true
+      })
+
+      await user.save().then((u) => {
+        user = u;
+      })
+      .catch(err => {
+        console.log('error',err);
+        return res.status(500).json({"error": err.message})
+      })
+    }
+
+    return res.status(200).json(formatData(user));
+  })
+  .catch(err => {
+    return res.status(500).json({"error": "Failed to authenticate you with google. Try with some other google account" })
+  })
 })
 
 app.listen(PORT,() => {
